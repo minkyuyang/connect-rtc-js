@@ -41,6 +41,7 @@ export default class VirtualWssConnectionManager {
             payload.topic = SOFTPHONE_ROUTE_KEY;
             payload.connectionId = this._connectionId;
             payload.jsonRpcMsg = JSON.parse(webSocketPayload);
+            this._logger.info("SendMessage: Topic: " + payload.topic + " ConnectionId: " + payload.connectionId + " jsonRPCMsg: " + payload.jsonRpcMsg);
             this._wssManager.sendMessage(payload);
         } catch (error) {
             this._logger.error("Error in sendMessage ", error);

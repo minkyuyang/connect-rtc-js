@@ -12,7 +12,7 @@ import {
     RTC_PEER_CONNECTION_CONFIG,
     RTC_PEER_CONNECTION_OPTIONAL_CONFIG,
     ICE_CONNECTION_STATE,
-    PEER_CONNECTION_STATE
+    PEER_CONNECTION_STATE, DEFAULT_ICE_CANDIDATE_POOL_SIZE
 } from './rtc_const';
 import {
     BusyExceptionName,
@@ -76,11 +76,15 @@ export class RTCSessionState {
     }
 }
 export class GrabLocalMediaState extends RTCSessionState {
+    constructor(rtcSession, isIceRestart) {
+        super(rtcSession);
+        this._isIceRestart = isIceRestart;
+    }
     onEnter() {
         var self = this;
         var startTime = Date.now();
         if (self._rtcSession._isUserProvidedStream) {
-            self.transit(new CreateOfferState(self._rtcSession));
+            self.transit(new CreateOfferState(self._rtcSession, this._isIceRestart));
         } else {
             var gumTimeoutPromise = new Promise((resolve, reject) => {
                 setTimeout(() => {
@@ -96,7 +100,7 @@ export class GrabLocalMediaState extends RTCSessionState {
                     self._rtcSession._localStream = stream;
                     self._rtcSession._sessionReport.gumOtherFailure = false;
                     self._rtcSession._sessionReport.gumTimeoutFailure = false;
-                    self.transit(new CreateOfferState(self._rtcSession));
+                    self.transit(new CreateOfferState(self._rtcSession, this._isIceRestart));
                 }).catch(e => {
                     self._rtcSession._sessionReport.gumTimeMillis = Date.now() - startTime;
                     var errorReason;
@@ -123,12 +127,22 @@ export class GrabLocalMediaState extends RTCSessionState {
     }
 }
 export class CreateOfferState extends RTCSessionState {
+    constructor(rtcSession, isIceRestart) {
+        super(rtcSession);
+        this._isIceRestart = isIceRestart;
+    }
     onEnter() {
         var self = this;
         var stream = self._rtcSession._localStream;
         self._rtcSession._pc.addStream(stream);
         self._rtcSession._onLocalStreamAdded(self._rtcSession, stream);
-        self._rtcSession._pc.createOffer().then(rtcSessionDescription => {
+        if(this._isIceRestart){
+            this.logger.info("Create Offer as Ice Restart");
+        }
+        else{
+            this.logger.info("Create Offer");
+        }
+        self._rtcSession._pc.createOffer({iceRestart : this._isIceRestart}).then(rtcSessionDescription => {
             self._rtcSession._localSessionDescription = rtcSessionDescription;
             self._rtcSession._sessionReport.createOfferFailure = false;
             self.transit(new SetLocalSessionDescriptionState(self._rtcSession));
@@ -165,7 +179,7 @@ export class SetLocalSessionDescriptionState extends RTCSessionState {
         localDescription.sdp += 'a=maxptime:20\r\n';
         localDescription.sdp = localDescription.sdp.replace("minptime=10", "minptime=20");
 
-        self.logger.info('LocalSD', self._rtcSession._localSessionDescription);
+        self.logger.info('LocalSDP: ' + self._rtcSession._localSessionDescription.sdp);
         self._rtcSession._pc.setLocalDescription(self._rtcSession._localSessionDescription).then(() => {
             var initializationTime = Date.now() - self._rtcSession._connectTimeStamp;
             self._rtcSession._sessionReport.initializationTimeMillis = initializationTime;
@@ -217,6 +231,7 @@ export class ConnectSignalingAndIceCollectionState extends RTCSessionState {
         this._signalingConnected = true;
         this._rtcSession._onSignalingConnected(this._rtcSession);
         this._rtcSession._sessionReport.signallingConnectionFailure = false;
+        this.logger.log("signalling connected with ms" + this._rtcSession._sessionReport.signallingConnectTimeMillis);
         this._checkAndTransit();
     }
     onSignalingFailed(e) {
@@ -231,7 +246,11 @@ export class ConnectSignalingAndIceCollectionState extends RTCSessionState {
     onIceCandidate(evt) {
         var candidate = evt.candidate;
         this.logger.log('onicecandidate ' + JSON.stringify(candidate));
+        this._rtcSession._pc.onicecandidateerror = (e) => {
+            console.log(e);
+        }
         if (candidate) {
+            this.logger.log("Candidate available: " + candidate.toString());
             if (candidate.candidate) {
                 this._iceCandidates.push(this._createLocalCandidate(candidate));
                 if (!this._iceCompleted) {
@@ -240,6 +259,7 @@ export class ConnectSignalingAndIceCollectionState extends RTCSessionState {
             }
 
         } else {
+            this.logger.log("no candidate available");
             this._reportIceCompleted(false);
         }
     }
@@ -424,13 +444,21 @@ export class TalkingState extends RTCSessionState {
         this.transit(new DisconnectedState(this._rtcSession));
     }
     onIceStateChange(evt) {
-        this.logger.info('ICE Connection State: ', evt.currentTarget.iceConnectionState);
+        this.logger.info('ICE Connection State: ' +  evt.currentTarget.iceConnectionState);
 
         if (evt.currentTarget.iceConnectionState == ICE_CONNECTION_STATE.DISCONNECTED) {
             this.logger.info('Lost ICE connection');
             this._rtcSession._sessionReport.iceConnectionsLost += 1;
+            setTimeout(() => {
+                if (this._rtcSession._pc.iceConnectionState === ICE_CONNECTION_STATE.DISCONNECTED){
+                    this.logger.info('Trying to restart ICE connection');
+                    this._rtcSession.connect(this._rtcSession._pc, true);
+                }
+            }, 3000)
         }
         if (evt.currentTarget.iceConnectionState == ICE_CONNECTION_STATE.FAILED) {
+            this.logger.info('ICE Connection failed')
+            this._rtcSession.connect(this._rtcSession._pc, true);
             this._rtcSession._sessionReport.iceConnectionsFailed = true;
         }
     }
@@ -439,6 +467,9 @@ export class TalkingState extends RTCSessionState {
         this.logger.info('Peer Connection State: ', this._rtcSession._pc.connectionState);
 
         if (this._rtcSession._pc.connectionState == PEER_CONNECTION_STATE.FAILED) {
+            if(this._rtcSession._pc.restartIce){
+                //this._rtcSession._pc.restartIce();
+            }
             this._rtcSession._sessionReport.peerConnectionFailed = true;
         }
     }
@@ -496,7 +527,7 @@ export default class RtcSession {
      * @param {*} logger An object provides logging functions, such as console
      * @param {*} contactId Must be UUID, uniquely identifies the session.
      */
-    constructor(signalingUri, iceServers, contactToken, logger, contactId, connectionId, wssManager) {
+    constructor(signalingUri, iceServers, contactToken, logger, transportHandle, contactId, connectionId, wssManager) {
         if (typeof signalingUri !== 'string' || signalingUri.trim().length === 0) {
             throw new IllegalParameters('signalingUri required');
         }
@@ -511,7 +542,9 @@ export default class RtcSession {
         } else {
             this._callId = contactId;
         }
+        logger.info("Creating RTCSession");
         this._connectionId = connectionId;
+        this._requestIceAccess = transportHandle;
         this._wssManager = wssManager;
         this._sessionReport = new SessionReport();
         this._signalingUri = signalingUri;
@@ -856,6 +889,12 @@ export default class RtcSession {
         signalingChannel.onRemoteHungup = hitch(this, this._signalingRemoteHungup);
         signalingChannel.onFailed = hitch(this, this._signalingFailed);
         signalingChannel.onDisconnected = hitch(this, this._signalingDisconnected);
+        this._logger.info("Created signaling channel obj");
+        this._logger.info("callId: ", this._callId);
+        this._logger.info("connectionId: ", this._connectionId);
+        this._logger.info("contactToke : ", this._contactToken);
+        this._logger.info("signaling uri: ", this._signalingUri);
+
 
         this._signalingChannel = signalingChannel;
 
@@ -880,17 +919,37 @@ export default class RtcSession {
     _signalingDisconnected() {
     }
     _createPeerConnection(configuration, optionalConfiguration) {
+        this._logger.info("Creating new peer connection")
         return new RTCPeerConnection(configuration, optionalConfiguration);
     }
-    connect(pc) {
+
+    connect(pc, isIceRestart) {
         var self = this;
         var now = new Date();
+        var timeout = (isIceRestart) ? 2000 : 0;
         self._sessionReport.sessionStartTime = now;
         self._connectTimeStamp = now.getTime();
         if (pc && pc.signalingState != 'closed') {
             self._pc = pc;
+            this._logger.info("pc exists and is not closed");
+            if(isIceRestart) {
+                this._requestIceAccess().then(function (response) {
+                        self._logger.info("requested new ice credentials: "+ JSON.parse(JSON.stringify(response)));
+                        var rtcPeerConnectionConfig = JSON.parse(JSON.stringify(RTC_PEER_CONNECTION_CONFIG));
+                        rtcPeerConnectionConfig.iceServers = response;
+                        rtcPeerConnectionConfig.iceCandidatePoolSize = DEFAULT_ICE_CANDIDATE_POOL_SIZE;
+                        self._pc.setConfiguration(rtcPeerConnectionConfig);
+                        self._logger.info("rtc peer connection config: "+ rtcPeerConnectionConfig);
+                    },
+                    // eslint-disable-next-line no-unused-vars
+                    function (reason) {
+                        self._peerConnectionRequestInFlight = false;
+                    });
+            }
+
         } else {
             if (pc) {
+                this._logger.info("pc exists but is closed, creating new one");
                 pc.close();
                 pc = null;
             }
@@ -902,11 +961,14 @@ export default class RtcSession {
         self._pc.onconnectionstatechange = hitch(self, self._onPeerConnectionStateChange);
         self._pc.oniceconnectionstatechange = hitch(self, self._onIceStateChange);
 
-        isLegacyStatsReportSupported(self._pc).then(result => {
+        isLegacyStatsReportSupported(self._pc).then( result => {
             self._legacyStatsReportSupport = result;
-            self.transit(new GrabLocalMediaState(self));
+            setTimeout(()=>{
+                self.transit(new GrabLocalMediaState(self, isIceRestart));
+            }, timeout)
         });
     }
+
     accept() {
         throw new UnsupportedOperation('accept does not go through signaling channel at this moment');
     }

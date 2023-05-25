@@ -79,7 +79,9 @@ export default class RtcPeerConnectionFactory {
         var self = this;
         if (!self._peerConnectionRequestInFlight && self._browserSupported) {
             self._peerConnectionRequestInFlight = true;
+            self._logger.log("peer connection start requesting ice access")
             self._requestIceAccess().then(function (response) {
+                    self._logger.log("peer connection requesting ice access: " + response);
                     self._pc = self._createRtcPeerConnection(response);
                     self._peerConnectionRequestInFlight = false;
                     self._idleRtcPeerConnectionTimerId = setTimeout(hitch(self, self._refreshRtcPeerConnection), RTC_PEER_CONNECTION_IDLE_TIMEOUT_MS);

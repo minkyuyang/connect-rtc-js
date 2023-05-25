@@ -434,8 +434,11 @@ export default class AmznRtcSignaling {
     _connectWebSocket(uri) {
         let wsConnection;
         if (this._wssManager) {
+            this._logger.info("connect web socket with wssManager");
             wsConnection = new VirtualWssConnectionManager(this._logger, this._connectionId, this._wssManager);
         }else {
+            this._logger.info("connect web socket ");
+            this.
             wsConnection = new WebSocket(uri);
         }
         wsConnection.onopen = hitch(this, this._onOpen);
@@ -446,8 +449,10 @@ export default class AmznRtcSignaling {
     }
     _buildInviteUri() {
         if (this._contactToken) {
+            this._logger.info("building Invite URI with contact token");
             return this._buildUriBase() + '&contactCtx=' + encodeURIComponent(this._contactToken);
         } else {
+            this._logger.info("build invite uri")
             return this._buildUriBase();
         }
     }
@@ -462,6 +467,7 @@ export default class AmznRtcSignaling {
         return this._signalingUri + separator + 'callId=' + encodeURIComponent(this._callId);
     }
     _onMessage(evt) {
+        this._logger.info("RPCMsg: " + JSON.stringify(JSON.parse(evt.data)));
         this.state.onRpcMsg(JSON.parse(evt.data));
     }
     _onOpen(evt) {
